@@ -7,7 +7,11 @@ pub struct Messages {
     pub empty_file: &'static str,
     pub open_failed: &'static str,
     pub image_unavailable: &'static str,
-    startup_failed: &'static str,
+    pub open_with_mdrilo: &'static str,
+    pub set_default: &'static str,
+    pub app_description: &'static str,
+    pub default_settings_failed: &'static str,
+    pub startup_failed: &'static str,
     error_code: &'static str,
     file_not_found: &'static str,
     access_denied: &'static str,
@@ -16,11 +20,8 @@ pub struct Messages {
 }
 
 impl Messages {
-    pub fn startup_error(&self, code: u32) -> String {
-        format!(
-            "{}\r\n{} 0x{code:08X}",
-            self.startup_failed, self.error_code
-        )
+    pub fn system_error(&self, message: &str, code: u32) -> String {
+        format!("{message}\r\n{} 0x{code:08X}", self.error_code)
     }
 
     pub fn file_error(&self, error: &Error) -> String {
@@ -42,6 +43,10 @@ const ENGLISH: Messages = Messages {
     empty_file: "Empty file",
     open_failed: "Couldn’t open the file",
     image_unavailable: "Image unavailable",
+    open_with_mdrilo: "Open with MDRilo",
+    set_default: "Set as default for .md…",
+    app_description: "Markdown viewer",
+    default_settings_failed: "Couldn’t open default app settings.",
     startup_failed: "Couldn’t start mdrilo.",
     error_code: "Error code",
     file_not_found: "File not found.",
@@ -56,6 +61,10 @@ const RUSSIAN: Messages = Messages {
     empty_file: "Файл пуст",
     open_failed: "Не удалось открыть файл",
     image_unavailable: "Изображение недоступно",
+    open_with_mdrilo: "Открыть с помощью MDRilo",
+    set_default: "Открывать .md по умолчанию…",
+    app_description: "Просмотрщик Markdown",
+    default_settings_failed: "Не удалось открыть настройки приложений по умолчанию.",
     startup_failed: "Не удалось запустить mdrilo.",
     error_code: "Код ошибки",
     file_not_found: "Файл не найден.",
@@ -100,7 +109,15 @@ mod tests {
         let invalid = Error::from(ErrorKind::InvalidData);
         assert_eq!(ENGLISH.file_error(&invalid), ENGLISH.invalid_encoding);
         assert_eq!(RUSSIAN.file_error(&invalid), RUSSIAN.invalid_encoding);
-        assert!(ENGLISH.startup_error(5).ends_with("Error code 0x00000005"));
-        assert!(RUSSIAN.startup_error(5).ends_with("Код ошибки 0x00000005"));
+        assert!(
+            ENGLISH
+                .system_error(ENGLISH.startup_failed, 5)
+                .ends_with("Error code 0x00000005")
+        );
+        assert!(
+            RUSSIAN
+                .system_error(RUSSIAN.startup_failed, 5)
+                .ends_with("Код ошибки 0x00000005")
+        );
     }
 }

@@ -1,6 +1,8 @@
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 #[cfg(windows)]
+mod associations;
+#[cfg(windows)]
 mod locale;
 #[cfg(windows)]
 mod render;

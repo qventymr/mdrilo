@@ -1,4 +1,5 @@
 use crate::{
+    associations,
     locale::{self, Messages},
     markdown::{self, Text},
     render::{Color, Face, Graphics, Rect, Surface, area},
@@ -60,6 +61,7 @@ use windows::{
 };
 
 const FRAME_MILLISECONDS: i32 = 16;
+const SET_DEFAULT_COMMAND: usize = 0x0100;
 
 thread_local! {
     static VIEWER: RefCell<Option<Viewer>> = const { RefCell::new(None) };
@@ -122,19 +124,22 @@ pub fn run() {
         result
     });
     if let Err(error) = result {
-        let message: Vec<u16> = messages
-            .startup_error(error.code().0 as u32)
-            .encode_utf16()
-            .chain([0])
-            .collect();
-        unsafe {
-            MessageBoxW(
-                None,
-                PCWSTR(message.as_ptr()),
-                w!("mdrilo"),
-                MB_OK | MB_ICONERROR,
-            );
-        }
+        show_error(
+            None,
+            &messages.system_error(messages.startup_failed, error.code().0 as u32),
+        );
+    }
+}
+
+fn show_error(window: Option<HWND>, text: &str) {
+    let message: Vec<u16> = text.encode_utf16().chain([0]).collect();
+    unsafe {
+        MessageBoxW(
+            window,
+            PCWSTR(message.as_ptr()),
+            w!("mdrilo"),
+            MB_OK | MB_ICONERROR,
+        );
     }
 }
 
@@ -197,6 +202,15 @@ fn run_window(messages: &'static Messages) -> Result<()> {
         )?;
         dark_frame(hwnd);
         DragAcceptFiles(hwnd, true);
+        let menu = GetSystemMenu(hwnd, false);
+        let label: Vec<u16> = messages.set_default.encode_utf16().chain([0]).collect();
+        let _ = InsertMenuW(
+            menu,
+            SC_CLOSE,
+            MF_BYCOMMAND | MF_STRING,
+            SET_DEFAULT_COMMAND,
+            PCWSTR(label.as_ptr()),
+        );
         let mut viewer = Viewer {
             hwnd,
             messages,
@@ -225,6 +239,7 @@ fn run_window(messages: &'static Messages) -> Result<()> {
         });
         let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
         let _ = UpdateWindow(hwnd);
+        let _ = associations::add_explorer_command(messages.open_with_mdrilo);
         let mut message = MSG::default();
         loop {
             let ready = MsgWaitForMultipleObjectsEx(
@@ -858,6 +873,16 @@ impl Viewer {
 
     fn message(&mut self, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         match message {
+            WM_SYSCOMMAND if wparam.0 & 0xfff0 == SET_DEFAULT_COMMAND => {
+                if let Err(error) =
+                    associations::open_default_settings(self.hwnd, self.messages.app_description)
+                {
+                    let message = self
+                        .messages
+                        .system_error(self.messages.default_settings_failed, error.code().0 as u32);
+                    show_error(Some(self.hwnd), &message);
+                }
+            }
             WM_PAINT => {
                 let mut paint = PAINTSTRUCT::default();
                 let dc = unsafe { BeginPaint(self.hwnd, &mut paint) };
