@@ -1,4 +1,41 @@
+use windows::Win32::UI::WindowsAndMessaging::WHEEL_DELTA;
+
 pub const AUTOSCROLL_DEAD_ZONE: f32 = 10.0;
+
+const ZOOM_LEVELS: [f32; 13] = [
+    0.50, 0.67, 0.75, 0.80, 0.90, 1.0, 1.10, 1.25, 1.50, 1.75, 2.0, 2.50, 3.0,
+];
+const DEFAULT_ZOOM_LEVEL: usize = 5;
+
+pub struct Zoom {
+    level: usize,
+    wheel_remainder: i32,
+}
+
+impl Default for Zoom {
+    fn default() -> Self {
+        Self {
+            level: DEFAULT_ZOOM_LEVEL,
+            wheel_remainder: 0,
+        }
+    }
+}
+
+impl Zoom {
+    pub fn scale(&self) -> f32 {
+        ZOOM_LEVELS[self.level]
+    }
+
+    pub fn wheel(&mut self, delta: i16) -> bool {
+        let ticks = self.wheel_remainder + i32::from(delta);
+        self.wheel_remainder = ticks % WHEEL_DELTA as i32;
+        let steps = ticks / WHEEL_DELTA as i32;
+        let next = (self.level as i32 + steps).clamp(0, ZOOM_LEVELS.len() as i32 - 1) as usize;
+        let changed = next != self.level;
+        self.level = next;
+        changed
+    }
+}
 
 pub fn autoscroll_speed(distance: f32) -> f32 {
     let offset = (distance.abs() - AUTOSCROLL_DEAD_ZONE).max(0.0);
@@ -41,6 +78,28 @@ impl WheelMotion {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accumulates_partial_wheel_ticks_for_zoom() {
+        let mut zoom = Zoom::default();
+        assert_eq!(zoom.scale(), 1.0);
+        assert!(!zoom.wheel(60));
+        assert!(zoom.wheel(60));
+        assert_eq!(zoom.scale(), 1.10);
+        assert!(zoom.wheel(-120));
+        assert_eq!(zoom.scale(), 1.0);
+    }
+
+    #[test]
+    fn bounds_zoom_in_both_directions() {
+        let mut zoom = Zoom::default();
+        assert!(zoom.wheel(1200));
+        assert_eq!(zoom.scale(), 3.0);
+        assert!(!zoom.wheel(120));
+        assert!(zoom.wheel(-2400));
+        assert_eq!(zoom.scale(), 0.50);
+        assert!(!zoom.wheel(-120));
+    }
 
     #[test]
     fn consecutive_notches_preserve_motion_and_reach_the_combined_target() {

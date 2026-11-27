@@ -3,7 +3,7 @@ use crate::{
     locale::{self, Messages},
     markdown::{self, Text},
     render::{Color, Face, Graphics, Rect, Surface, area},
-    scroll::{AUTOSCROLL_DEAD_ZONE, WheelMotion, autoscroll_speed},
+    scroll::{AUTOSCROLL_DEAD_ZONE, WheelMotion, Zoom, autoscroll_speed},
     view::{Cursor, View, contains, local_path, url_text},
 };
 use pulldown_cmark::Alignment;
@@ -62,6 +62,7 @@ use windows::{
 
 const FRAME_MILLISECONDS: i32 = 16;
 const SET_DEFAULT_COMMAND: usize = 0x0100;
+const MK_CONTROL: usize = 0x0008;
 
 thread_local! {
     static VIEWER: RefCell<Option<Viewer>> = const { RefCell::new(None) };
@@ -98,6 +99,9 @@ struct Viewer {
     width: f32,
     height: f32,
     scroll: f32,
+    zoom: Zoom,
+    document_scale: f32,
+    zoom_anchor: f32,
     wheel_lines: u32,
     animate_scroll: bool,
     wheel_motion: Option<WheelMotion>,
@@ -220,6 +224,9 @@ fn run_window(messages: &'static Messages) -> Result<()> {
             width: 0.0,
             height: 0.0,
             scroll: 0.0,
+            zoom: Zoom::default(),
+            document_scale: 1.0,
+            zoom_anchor: 0.0,
             wheel_lines: wheel_lines(),
             animate_scroll: scroll_animation_enabled(),
             wheel_motion: None,
@@ -375,6 +382,7 @@ impl Viewer {
         self.selection = None;
         self.drag = Drag::None;
         self.scroll = 0.0;
+        self.zoom_anchor = 0.0;
         match markdown::read(&path) {
             Ok(blocks) => {
                 self.doc = Some(View::new(path, blocks, self.messages.image_unavailable));
@@ -391,15 +399,16 @@ impl Viewer {
     }
 
     fn column(&self) -> (f32, f32) {
-        let padding = (self.width * 0.066).clamp(22.0, 62.0);
-        let width = (self.width - padding * 2.0).clamp(1.0, 758.0);
-        ((self.width - width) * 0.5, width)
+        let available = self.width / self.document_scale;
+        let padding = (self.width * 0.066).clamp(22.0, 62.0) / self.document_scale;
+        let width = (available - padding * 2.0).clamp(1.0, 758.0);
+        ((available - width) * 0.5, width)
     }
 
     fn scroll_max(&self) -> f32 {
-        self.doc
-            .as_ref()
-            .map_or(0.0, |doc| (doc.height() - self.height).max(0.0))
+        self.doc.as_ref().map_or(0.0, |doc| {
+            (doc.height() * self.document_scale - self.height).max(0.0)
+        })
     }
 
     fn scroll_to(&mut self, position: f32) {
@@ -437,6 +446,18 @@ impl Viewer {
         }
         self.wheel_motion = Some(motion);
         self.sync_scroll_timer();
+    }
+
+    fn zoom_wheel(&mut self, delta: i16, y: f32) {
+        if self.doc.as_ref().is_some_and(View::has_content)
+            && !matches!(self.drag, Drag::Scrollbar { .. })
+            && self.zoom.wheel(delta)
+        {
+            self.stop_wheel();
+            self.stop_autoscroll();
+            self.zoom_anchor = y;
+            self.redraw();
+        }
     }
 
     fn advance_scroll(&mut self) -> bool {
@@ -531,26 +552,37 @@ impl Viewer {
             self.drop_surface();
             return;
         }
+        let previous_scale = self.document_scale;
+        self.document_scale = self.zoom.scale();
+        let scale = self.document_scale;
+        let anchor_y = if scale == previous_scale {
+            0.0
+        } else {
+            self.zoom_anchor.clamp(0.0, self.height)
+        };
         let (left, width) = self.column();
         surface.begin();
         if let Some(doc) = &mut self.doc
             && doc.has_content()
         {
-            self.scroll = doc
-                .reflow(&self.gfx, width, self.scroll)
-                .clamp(0.0, (doc.height() - self.height).max(0.0));
-            let visible_scroll = pixel_scroll(self.scroll, self.dpi);
-            let canvas = surface.canvas(left, -visible_scroll);
-            canvas.clip(area(-10.0, visible_scroll, width + 20.0, self.height));
-            doc.paint(
-                &self.gfx,
-                &canvas,
-                visible_scroll,
-                self.height,
-                self.dpi / 96.0,
-                self.selection,
-            );
-            canvas.unclip();
+            let anchor = doc.reflow(&self.gfx, width, (self.scroll + anchor_y) / previous_scale);
+            self.scroll = (anchor * scale - anchor_y)
+                .clamp(0.0, (doc.height() * scale - self.height).max(0.0));
+            let visible_scroll = pixel_scroll(self.scroll, self.dpi) / scale;
+            let viewport_height = self.height / scale;
+            surface.scaled(scale, || {
+                let canvas = surface.canvas(left, -visible_scroll);
+                canvas.clip(area(-10.0, visible_scroll, width + 20.0, viewport_height));
+                doc.paint(
+                    &self.gfx,
+                    &canvas,
+                    visible_scroll,
+                    viewport_height,
+                    self.dpi * scale / 96.0,
+                    self.selection,
+                );
+                canvas.unclip();
+            });
             if let Some(thumb) = self.thumb() {
                 let color = if matches!(self.drag, Drag::Scrollbar { .. }) {
                     Color::Quote
@@ -620,10 +652,18 @@ impl Viewer {
     }
 
     fn point(&self, lparam: LPARAM) -> (f32, f32) {
-        let bits = lparam.0 as u32;
-        let x = bits as i16 as f32;
-        let y = (bits >> 16) as i16 as f32;
-        (x * 96.0 / self.dpi, y * 96.0 / self.dpi)
+        let point = message_point(lparam);
+        (
+            point.x as f32 * 96.0 / self.dpi,
+            point.y as f32 * 96.0 / self.dpi,
+        )
+    }
+
+    fn document_point(&self, x: f32, y: f32) -> (f32, f32) {
+        (
+            x / self.document_scale - self.column().0,
+            (y + pixel_scroll(self.scroll, self.dpi)) / self.document_scale,
+        )
     }
 
     fn cursor_at(&mut self, x: f32, y: f32) -> HCURSOR {
@@ -633,11 +673,11 @@ impl Viewer {
         if x >= self.width - 17.0 && self.thumb().is_some() {
             return self.cursors[0];
         }
-        let left = self.column().0;
+        let (x, y) = self.document_point(x, y);
         let Some(doc) = &mut self.doc else {
             return self.cursors[0];
         };
-        let hit = doc.hit(&self.gfx, x - left, y + pixel_scroll(self.scroll, self.dpi));
+        let hit = doc.hit(&self.gfx, x, y);
         if hit.link.is_some() {
             self.cursors[2]
         } else if hit.text {
@@ -670,9 +710,9 @@ impl Viewer {
             }
             return;
         }
-        let left = self.column().0;
+        let (doc_x, doc_y) = self.document_point(x, y);
         let Some(doc) = &mut self.doc else { return };
-        let hit = doc.hit(&self.gfx, x - left, y + pixel_scroll(self.scroll, self.dpi));
+        let hit = doc.hit(&self.gfx, doc_x, doc_y);
         self.drag = Drag::Text {
             x,
             y,
@@ -699,17 +739,14 @@ impl Viewer {
                     let distance = y - y.clamp(0.0, self.height);
                     self.scroll_to(self.scroll + distance.clamp(-95.0, 95.0));
                 }
-                let left = self.column().0;
+                let (doc_x, doc_y) = self.document_point(x, y.clamp(0.0, self.height));
                 if let Some(doc) = &mut self.doc
                     && let Some((start, end)) = self.selection
+                    && let Some(cursor) = doc.hit(&self.gfx, doc_x, doc_y).cursor
+                    && cursor != end
                 {
-                    let y = y.clamp(0.0, self.height) + pixel_scroll(self.scroll, self.dpi);
-                    if let Some(cursor) = doc.hit(&self.gfx, x - left, y).cursor
-                        && cursor != end
-                    {
-                        self.selection = Some((start, cursor));
-                        self.redraw();
-                    }
+                    self.selection = Some((start, cursor));
+                    self.redraw();
                 }
             }
             Drag::Scrollbar { offset } => {
@@ -795,7 +832,7 @@ impl Viewer {
         if let Some(fragment) = url.strip_prefix('#') {
             let position = url_text(fragment).and_then(|anchor| self.doc.as_ref()?.anchor(&anchor));
             if let Some(position) = position {
-                self.scroll_to(position);
+                self.scroll_to(position * self.document_scale);
             }
             return;
         }
@@ -832,7 +869,7 @@ impl Viewer {
                 if let Some(doc) = &mut self.doc {
                     doc.reflow(&self.gfx, width, 0.0);
                     if let Some(position) = doc.anchor(&anchor) {
-                        self.scroll_to(position);
+                        self.scroll_to(position * self.document_scale);
                     }
                 }
             }
@@ -936,7 +973,18 @@ impl Viewer {
                     }
                 }
             }
-            WM_MOUSEWHEEL => self.scroll_wheel((wparam.0 >> 16) as i16),
+            WM_MOUSEWHEEL => {
+                let delta = (wparam.0 >> 16) as i16;
+                if wparam.0 & MK_CONTROL != 0 {
+                    let mut point = message_point(lparam);
+                    unsafe {
+                        let _ = ScreenToClient(self.hwnd, &mut point);
+                    }
+                    self.zoom_wheel(delta, point.y as f32 * 96.0 / self.dpi);
+                } else {
+                    self.scroll_wheel(delta);
+                }
+            }
             WM_MBUTTONDOWN => {
                 let (x, y) = self.point(lparam);
                 self.middle_down(x, y);
@@ -980,6 +1028,14 @@ impl Viewer {
             _ => return None,
         }
         Some(LRESULT(0))
+    }
+}
+
+fn message_point(lparam: LPARAM) -> POINT {
+    let bits = lparam.0 as u32;
+    POINT {
+        x: i32::from(bits as i16),
+        y: i32::from((bits >> 16) as i16),
     }
 }
 

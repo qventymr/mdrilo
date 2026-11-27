@@ -18,7 +18,7 @@ use windows::{
     },
     core::{BOOL, Interface, PCWSTR, Result, w},
 };
-use windows_numerics::Vector2;
+use windows_numerics::{Matrix3x2, Vector2};
 
 #[derive(Clone, Copy)]
 pub enum Color {
@@ -454,6 +454,20 @@ impl Surface {
 
     pub fn end(&self) -> Result<()> {
         unsafe { self.target.EndDraw(None, None) }
+    }
+
+    pub fn scaled(&self, scale: f32, draw: impl FnOnce()) {
+        if scale == 1.0 {
+            draw();
+            return;
+        }
+        unsafe {
+            self.target.SetTransform(&Matrix3x2::scale(scale, scale));
+        }
+        draw();
+        unsafe {
+            self.target.SetTransform(&Matrix3x2::scale(1.0, 1.0));
+        }
     }
 
     pub fn canvas(&self, x: f32, y: f32) -> Canvas<'_> {

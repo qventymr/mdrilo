@@ -118,10 +118,10 @@ impl View {
             return scroll;
         }
         let top_row = self.row_at(scroll);
-        let offset = self
+        let old_anchor = self
             .rows
             .get(top_row)
-            .map_or(0.0, |row| scroll - row.rect.top);
+            .map(|row| (scroll - row.rect.top, row.rect.bottom - row.rect.top));
         self.width = width;
         self.runs.clear();
         self.rows.clear();
@@ -281,9 +281,17 @@ impl View {
         if scroll <= 0.0 {
             0.0
         } else {
-            self.rows
-                .get(top_row)
-                .map_or(scroll, |row| row.rect.top + offset)
+            old_anchor
+                .zip(self.rows.get(top_row))
+                .map_or(scroll, |((offset, old_height), row)| {
+                    // Keep the same relative position inside a row that wraps differently.
+                    let offset = if offset > 0.0 {
+                        offset * (row.rect.bottom - row.rect.top) / old_height.max(1.0)
+                    } else {
+                        offset
+                    };
+                    row.rect.top + offset
+                })
         }
     }
 
